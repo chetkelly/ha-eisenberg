@@ -163,8 +163,9 @@ action, and was nearly missed.)
 
 Poll on a cadence with `CronCreate` (session-only, in-memory, dies on exit):
 
-- `cron`: `7 */12 * * *` (twice a day at :07 — vjt's chosen cadence; the
-  off-minute is deliberate. Adjust only if he asks for something different)
+- `cron`: `17 9 * * *` (once a day at 09:17 — vjt's chosen cadence since
+  2026-10-09, to stop burning tokens on empty polls; the off-minute is
+  deliberate. Adjust only if vjt asks for something different)
 - `recurring: true`
 - `prompt`: a self-contained instruction that repeats Steps 1–3. **It must tell
   the cron to build the set itself from BOTH queries in Step 1 — open issues and
