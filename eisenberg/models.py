@@ -409,6 +409,9 @@ class StreamResponse(BaseModel):
 # doorbells, all-in-one arloq units) is camera-capable. Matched lowercased.
 _BASE_STATION_DEVICE_TYPES: frozenset[str] = frozenset({"basestation", "arlobridge", "hub"})
 
+# Arlo deviceType of a video doorbell. Matched lowercased.
+_DOORBELL_DEVICE_TYPE = "doorbell"
+
 
 class DeviceInfo(BaseModel):
     """Device info from the devices list API."""
@@ -448,3 +451,19 @@ class DeviceInfo(BaseModel):
         drop a real camera just because Arlo omitted the field.
         """
         return (self.device_type or "").lower() in _BASE_STATION_DEVICE_TYPES
+
+    @property
+    def is_doorbell(self) -> bool:
+        """True when Arlo classifies this device as a video doorbell."""
+        return (self.device_type or "").lower() == _DOORBELL_DEVICE_TYPE
+
+    @property
+    def camera_resource_filter(self) -> str:
+        """MQTT filter for this device's `cameras/<id>` resource.
+
+        A Gen2 doorbell (AVD3001A) publishes its instant `motionDetected`
+        under `cameras/<id>` while declaring only `doorbells/<id>/#` in
+        allowedMqttTopics, so on accounts where the broker refuses the
+        `d/{xCloudId}/out/#` wildcard nothing else covers it (issue #38).
+        """
+        return f"d/{self.x_cloud_id}/out/cameras/{self.device_id}/#"

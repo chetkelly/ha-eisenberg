@@ -201,10 +201,17 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         base-less cameras publish motion/battery/signal on roots the broad
         `d/{xCloudId}/out/#` wildcard can miss, so we hand them to the
         subscriber explicitly. Empty when no device declares any.
+
+        Doorbells also get their `cameras/<id>/#` filter, which Arlo leaves
+        out of their declared list even though Gen2 doorbells publish motion
+        there (issue #38). The broker may refuse it; the SUBACK summary says.
         """
         topics: list[str] = []
         for device in self._devices:
-            for topic in device.allowed_mqtt_topics:
+            declared = list(device.allowed_mqtt_topics)
+            if device.is_doorbell:
+                declared.append(device.camera_resource_filter)
+            for topic in declared:
                 if topic not in topics:
                     topics.append(topic)
         return topics
@@ -568,6 +575,20 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         result = outcome.result_for(user_topic)
         verdict = "ABSENT" if result is None else ("GRANTED" if result.granted else "REFUSED")
         _LOGGER.info("MQTT user topic %s = %s", user_topic, verdict)
+        # INFO, not DEBUG: whether the broker lets a doorbell's undeclared
+        # cameras/<id> topic through decides whether its Motion is instant
+        # or waits for the AI event, and one startup line should answer it.
+        for device in self._devices:
+            if not device.is_doorbell:
+                continue
+            result = outcome.result_for(device.camera_resource_filter)
+            verdict = "ABSENT" if result is None else ("GRANTED" if result.granted else "REFUSED")
+            _LOGGER.info(
+                "MQTT doorbell %s camera topic %s = %s",
+                device.device_name,
+                device.camera_resource_filter,
+                verdict,
+            )
 
     async def async_set_active_mode(self, location_id: str, mode: str) -> None:
         """Set the security mode of one location via the v3 location API.

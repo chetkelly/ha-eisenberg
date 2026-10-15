@@ -142,6 +142,7 @@ class TestAsyncSetActiveMode:
 class TestSubackSummary:
     def test_logs_counts_refused_and_user_topic(self, caplog: pytest.LogCaptureFixture) -> None:
         coord = EisenbergCoordinator.__new__(EisenbergCoordinator)
+        coord._devices = []
         coord.client = SimpleNamespace(user_id="USER")  # type: ignore[attr-defined]
         outcome = SubscribeOutcome(
             results=[
@@ -162,6 +163,7 @@ class TestSubackSummary:
 
     def test_user_topic_granted(self, caplog: pytest.LogCaptureFixture) -> None:
         coord = EisenbergCoordinator.__new__(EisenbergCoordinator)
+        coord._devices = []
         coord.client = SimpleNamespace(user_id="USER")  # type: ignore[attr-defined]
         outcome = SubscribeOutcome(
             results=[TopicResult(topic="u/USER/in/#", code=1, granted=True)]
