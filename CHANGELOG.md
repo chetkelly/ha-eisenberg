@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.5.2 — 2026-10-22
+
+### Fixed
+
+- **Gen2 video doorbells get instant Motion again on restricted accounts (#38).**
+  A Gen2 doorbell (AVD3001A) on direct WiFi publishes its instant
+  `motionDetected` under the `cameras/<id>` resource, but declares only
+  `doorbells/<id>/#` in its `allowedMqttTopics`. On accounts where Arlo's
+  broker refuses the broad `d/{xCloudId}/out/#` wildcard nothing covered that
+  topic, so Motion only caught up ~20 s later with the AI "Person" event.
+
+  Doorbells now also subscribe to `cameras/<id>/#` explicitly. If the broker
+  refuses that too, the integration opens Arlo's server-sent event stream —
+  the channel AArlo/pyaarlo uses — and takes from it only the device resources
+  MQTT cannot deliver, feeding them through the same handlers. Accounts whose
+  broker grants everything (most of them) never open it. The startup log says
+  which way it went: `MQTT doorbell <name> camera topic … = GRANTED|REFUSED`,
+  and `receiving them over SSE instead` when the supplement is in use.
+
 ## 0.5.1 — 2026-10-06
 
 ### Fixed
