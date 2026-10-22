@@ -41,17 +41,19 @@ class CustomModeEntry(BaseModel):
 
 
 def custom_mode_labels(raw: dict[str, Any]) -> dict[str, dict[str, str]]:
-    """customModes.properties → gateway id → mode key → display label.
+    """customModes.properties → gateway id → mode key → name, named modes only.
 
-    Named modes (keyed by uuid) show their name; the migrated `armed` and
-    `disarmed` keys carry an empty name and show the key.
+    Arlo migrates the pre-v3 modes in as `armed`/`disarmed` with no name. The
+    Arlo app offers the standard modes plus the ones the user named; the
+    nameless pair would only sit beside Arm Away and Standby as duplicates.
     """
     labels: dict[str, dict[str, str]] = {}
     for gateway_id, modes in raw.items():
         entries = {k: CustomModeEntry.model_validate(v) for k, v in dict(modes).items()}
         labels[gateway_id] = {
-            key: key if entry.name in ("", _UNNAMED_CUSTOM_MODE) else entry.name
+            key: entry.name
             for key, entry in entries.items()
+            if entry.name not in ("", _UNNAMED_CUSTOM_MODE)
         }
     return labels
 
@@ -266,12 +268,19 @@ class LocationState(BaseModel):
 
     @property
     def mode_options(self) -> list[str]:
-        """Standard modes, then each distinct custom mode label."""
+        """Standard modes, then each distinct named custom mode.
+
+        A nameless migrated mode is listed only while it is the active one
+        (shown by its key), so the select can always show what is running.
+        """
         options = [m.value for m in ArloMode]
         for modes in self.custom_modes.values():
             for label in modes.values():
                 if label not in options:
                     options.append(label)
+        active = self.mode_label
+        if active is not None and active not in options:
+            options.append(active)
         return options
 
     def custom_target(self, label: str) -> dict[str, str]:

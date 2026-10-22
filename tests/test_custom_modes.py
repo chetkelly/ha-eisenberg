@@ -60,10 +60,8 @@ class TestCustomModeLabels:
     def test_named_mode_uses_its_name(self) -> None:
         assert custom_mode_labels(CUSTOM_MODES_RAW)[GW][UUID] == "Night"
 
-    def test_unnamed_legacy_modes_use_their_key(self) -> None:
-        labels = custom_mode_labels(CUSTOM_MODES_RAW)[GW]
-        assert labels["armed"] == "armed"
-        assert labels["disarmed"] == "disarmed"
+    def test_nameless_migrated_modes_are_left_out(self) -> None:
+        assert custom_mode_labels(CUSTOM_MODES_RAW)[GW] == {UUID: "Night"}
 
     def test_absent_section_is_empty(self) -> None:
         assert custom_mode_labels({}) == {}
@@ -79,15 +77,15 @@ class TestLocationModeLabel:
         loc.set_mode("custom", {GW: UUID})
         assert loc.mode_label == "Night"
 
-    def test_options_list_standard_then_custom(self) -> None:
-        assert _location().mode_options == [
-            "armAway",
-            "armHome",
-            "standby",
-            "disarmed",
-            "armed",
-            "Night",
-        ]
+    def test_options_list_standard_then_named_custom(self) -> None:
+        assert _location().mode_options == ["armAway", "armHome", "standby", "Night"]
+
+    def test_active_nameless_mode_is_shown_by_key(self) -> None:
+        """The app can still run a migrated mode; the select must show it."""
+        loc = _location()
+        loc.set_mode("custom", {GW: "armed"})
+        assert loc.mode_label == "armed"
+        assert loc.mode_options == ["armAway", "armHome", "standby", "Night", "armed"]
 
     def test_custom_target_maps_label_to_gateway_key(self) -> None:
         assert _location().custom_target("Night") == {GW: UUID}
