@@ -89,21 +89,21 @@ class TestApplyMode:
         a = LocationState(location_id="locA", gateway_device_ids=[], active_mode="standby")
         b = LocationState(location_id="locB", gateway_device_ids=[], active_mode="standby")
         coord = _coord([a, b])
-        coord._apply_mode("locB", "armAway")
+        coord._apply_mode("locB", "armAway", {})
         assert a.active_mode == "standby"
         assert b.active_mode == "armAway"
 
     def test_no_location_id_single_location_updates_sole(self) -> None:
         a = LocationState(location_id="locA", gateway_device_ids=[], active_mode="standby")
         coord = _coord([a])
-        coord._apply_mode(None, "armHome")
+        coord._apply_mode(None, "armHome", {})
         assert a.active_mode == "armHome"
 
     def test_no_location_id_multi_location_is_ignored(self) -> None:
         a = LocationState(location_id="locA", gateway_device_ids=[], active_mode="standby")
         b = LocationState(location_id="locB", gateway_device_ids=[], active_mode="standby")
         coord = _coord([a, b])
-        coord._apply_mode(None, "armAway")
+        coord._apply_mode(None, "armAway", {})
         assert a.active_mode == "standby"
         assert b.active_mode == "standby"
 
@@ -120,9 +120,11 @@ class TestAsyncSetActiveMode:
 
         calls: list[tuple[str, str, int]] = []
 
-        async def _set_active_mode(loc: str, mode: str, rev: int) -> Any:
+        async def _set_active_mode(loc: str, mode: str, rev: int, custom: Any) -> Any:
             calls.append((loc, mode, rev))
-            return SimpleNamespace(revision=rev + 1, properties=SimpleNamespace(mode=mode))
+            return SimpleNamespace(
+                revision=rev + 1, properties=SimpleNamespace(mode=mode, custom={})
+            )
 
         coord.client = SimpleNamespace(set_active_mode=_set_active_mode)  # type: ignore[attr-defined]
 

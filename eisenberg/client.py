@@ -38,6 +38,7 @@ from .models import (
     LocationInfo,
     SecondFactor,
     StreamResponse,
+    custom_mode_labels,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -804,12 +805,43 @@ class EisenbergClient:
             data = body
         return ActiveModeState.model_validate(data)
 
-    async def set_active_mode(self, location_id: str, mode: str, revision: int) -> ActiveModeState:
+    async def get_custom_modes(self, location_id: str) -> dict[str, dict[str, str]]:
+        """Custom modes of a location: gateway id → mode key → label (#39).
+
+        Read from the location's v3 automation document, the same one pyaarlo
+        parses. Empty when the account has never been migrated to custom modes.
+        """
+        if self.token is None:
+            raise RuntimeError("Not authenticated")
+
+        async with self.session.get(
+            f"{MYAPI_BASE}/hmsweb/automation/v3",
+            headers=self._v3_mode_headers(self.token),
+            params={"locationId": location_id, "revisions": "false"},
+        ) as resp:
+            body = await _read_arlo_json(resp)
+
+        if not body.get("success"):
+            _raise_for_arlo_error(body, "get_custom_modes")
+        section = body["data"].get("customModes")
+        if section is None:
+            return {}
+        _LOGGER.debug("customModes for %s: %s", location_id, section)
+        return custom_mode_labels(section["properties"])
+
+    async def set_active_mode(
+        self,
+        location_id: str,
+        mode: str,
+        revision: int,
+        custom: dict[str, str] | None,
+    ) -> ActiveModeState:
         """Set the active mode for a location. Returns the new revision.
 
         Mirrors pyaarlo's set_mode: PUT activeMode?locationId=...&revision=N
-        with body {"mode": "<name>"}. The server returns a fresh revision
-        which the caller must store for the next call.
+        with body {"mode": "<name>"}, or {"mode": "custom", "custom":
+        {gatewayId: modeKey}} for a custom mode (#39). The server returns a
+        fresh revision which the caller must store for the next call.
         """
         if self.token is None:
             raise RuntimeError("Not authenticated")
@@ -818,7 +850,7 @@ class EisenbergClient:
             f"{MYAPI_BASE}/hmsweb/automation/v3/activeMode",
             headers=self._v3_mode_headers(self.token),
             params={"locationId": location_id, "revision": str(revision)},
-            json={"mode": mode},
+            json={"mode": mode} if custom is None else {"mode": mode, "custom": custom},
         ) as resp:
             body = await _read_arlo_json(resp)
 

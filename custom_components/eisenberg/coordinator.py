@@ -40,7 +40,9 @@ from eisenberg import (
     TransientAPIError,
 )
 from eisenberg.models import (
+    CUSTOM_MODE,
     ActiveMode,
+    ArloMode,
     BasestationState,
     DeviceState,
     LastImageSnapshotAvailable,
@@ -53,6 +55,7 @@ from eisenberg.models import (
     SnapshotAvailable,
     SpotlightState,
     SubscribeOutcome,
+    custom_mode_labels,
 )
 from eisenberg.mqtt import EventHandler, TopicRouter, topic_matches
 
@@ -68,6 +71,8 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_STANDARD_MODES = frozenset(m.value for m in ArloMode)
 
 # Health check interval (token refresh, device sync)
 HEALTH_CHECK_INTERVAL = timedelta(minutes=30)
@@ -545,7 +550,7 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as err:
             raise HomeAssistantError(f"Snapshot request failed: {err}") from err
 
-    def _apply_mode(self, location_id: str | None, mode: str) -> None:
+    def _apply_mode(self, location_id: str | None, mode: str, custom: dict[str, str]) -> None:
         """Record a mode change from an MQTT event onto the right location.
 
         Events that carry a locationId route precisely. Events without one are
@@ -555,12 +560,12 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if location_id is not None:
             location = self.locations.get(location_id)
             if location is not None:
-                location.active_mode = mode
+                location.set_mode(mode, custom)
             else:
                 _LOGGER.info("Mode event for unknown location %s: %s", location_id, mode)
             return
         if len(self.locations) == 1:
-            next(iter(self.locations.values())).active_mode = mode
+            next(iter(self.locations.values())).set_mode(mode, custom)
         elif len(self.locations) > 1:
             _LOGGER.debug(
                 "Ambiguous mode push (no locationId) on multi-location account; ignoring"
@@ -712,8 +717,19 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         from eisenberg import APIError
 
+        # `mode` is what the select offers: a standard mode, or a custom
+        # mode's label, sent as "custom" plus the key each gateway runs (#39).
+        custom: dict[str, str] | None = None
+        if mode not in _STANDARD_MODES:
+            custom = location.custom_target(mode)
+            if not custom:
+                raise ValueError(f"Unknown mode {mode!r} for location {location_id}")
+            mode = CUSTOM_MODE
+
         async def _do_set() -> Any:
-            return await self.client.set_active_mode(location_id, mode, location.mode_revision)
+            return await self.client.set_active_mode(
+                location_id, mode, location.mode_revision, custom
+            )
 
         try:
             result = await self.call_with_session_retry("set_active_mode", _do_set)
@@ -726,9 +742,9 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if result.revision:
             location.mode_revision = result.revision
         if result.properties is not None:
-            location.active_mode = result.properties.mode
+            location.set_mode(result.properties.mode, result.properties.custom)
         else:
-            location.active_mode = mode
+            location.set_mode(mode, custom or {})
         self._push_to_entities()
 
     async def _save_cookies(self) -> None:
@@ -880,10 +896,19 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     state = await self.client.get_active_mode(info.location_id)
                     location.mode_revision = state.revision or 1
                     if state.properties is not None:
-                        location.active_mode = state.properties.mode
+                        location.set_mode(state.properties.mode, state.properties.custom)
                 except Exception:
                     _LOGGER.warning(
                         "Could not fetch mode for location %s",
+                        info.location_id,
+                        exc_info=True,
+                    )
+                try:
+                    location.custom_modes = await self.client.get_custom_modes(info.location_id)
+                except Exception:
+                    # Standard modes still work; only the custom ones go missing.
+                    _LOGGER.warning(
+                        "Could not fetch custom modes for location %s",
                         info.location_id,
                         exc_info=True,
                     )
@@ -964,6 +989,7 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Mode changes
         routes.append(("u/+/in/automation/activeMode/is", self._handle_active_mode))
+        routes.append(("u/+/in/automation/customModes/is", self._handle_custom_modes))
 
         # Connectivity
         routes.append(("d/+/out/basestation/connectivity/is", self._handle_connectivity))
@@ -1227,7 +1253,11 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         elif feed_type == "modeChange":
             try:
                 event = ModeChangeEvent.model_validate(payload)
-                self._apply_mode(event.location_id, event.active_mode)
+                # A custom mode shows up here as one gateway's mode key, which
+                # cannot say what the whole location runs; the activeMode
+                # event that accompanies it does, so leave it to that (#39).
+                if event.active_mode in _STANDARD_MODES:
+                    self._apply_mode(event.location_id, event.active_mode, {})
                 _LOGGER.debug(
                     "Mode change: location=%s mode=%s", event.location_id, event.active_mode
                 )
@@ -1268,6 +1298,7 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._apply_mode(
                 location_id if isinstance(location_id, str) else None,
                 mode.properties.mode,
+                mode.properties.custom,
             )
             _LOGGER.debug("Active mode update: %s", mode.properties.mode)
             self._push_to_entities()
@@ -1276,6 +1307,21 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "Failed to parse active mode: %s",
                 json.dumps(payload)[:500],
             )
+
+    async def _handle_custom_modes(self, topic: str, payload: dict[str, Any]) -> None:
+        """Custom modes created, renamed or deleted in the Arlo app (#39)."""
+        location_id = payload.get("locationId")
+        location = self.locations.get(location_id) if isinstance(location_id, str) else None
+        if location is None:
+            _LOGGER.info("Custom modes for unknown location %s", location_id)
+            return
+        try:
+            location.custom_modes = custom_mode_labels(payload["properties"]["properties"])
+        except Exception:
+            _LOGGER.warning("Failed to parse custom modes: %s", json.dumps(payload)[:500])
+            return
+        _LOGGER.debug("Custom modes for %s: %s", location_id, location.custom_modes)
+        self._push_to_entities()
 
     async def _handle_connectivity(self, topic: str, payload: dict[str, Any]) -> None:
         """Handle connectivity updates."""
@@ -1504,7 +1550,8 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             active_mode = states["activeMode"]  # pyright: ignore[reportUnknownVariableType]
         except (KeyError, TypeError):
             return
-        if isinstance(active_mode, str):
+        # Custom modes arrive here as a mode key; activeMode is the authority (#39).
+        if isinstance(active_mode, str) and active_mode in _STANDARD_MODES:
             # Topic: d/{xCloudId}/out/devices/{deviceId}/states/is — resolve the
             # broadcasting device to its location so multi-location accounts
             # update the right one. Falls back to the sole location otherwise.
@@ -1516,7 +1563,9 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else None
             )
             location = self.location_for_device(device) if device is not None else None
-            self._apply_mode(location.location_id if location is not None else None, active_mode)
+            self._apply_mode(
+                location.location_id if location is not None else None, active_mode, {}
+            )
             self._push_to_entities()
 
     async def _handle_geofences(self, topic: str, payload: dict[str, Any]) -> None:

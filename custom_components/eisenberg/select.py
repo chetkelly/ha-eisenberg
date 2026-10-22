@@ -1,4 +1,4 @@
-"""Select platform for Eisenberg — security mode (Armed Away/Home/Standby).
+"""Select platform for Eisenberg — security mode (Away/Home/Standby + custom modes).
 
 Modes are scoped per location in Arlo's v3 automation API, so we expose one
 security-mode select per location. Single-location accounts (the common case)
@@ -21,9 +21,6 @@ from eisenberg.models import DeviceInfo, LocationState
 from .coordinator import EisenbergCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-
-# Order matches the Arlo app: most-restrictive first.
-SECURITY_MODE_OPTIONS = ["armAway", "armHome", "standby"]
 
 _LEGACY_UNIQUE_ID = "eisenberg_security_mode"
 
@@ -66,7 +63,6 @@ class SecurityModeSelect(CoordinatorEntity[EisenbergCoordinator], SelectEntity):
 
     _attr_has_entity_name = True
     _attr_icon = "mdi:shield-home"
-    _attr_options = SECURITY_MODE_OPTIONS
 
     def __init__(self, coordinator: EisenbergCoordinator, location_id: str, single: bool) -> None:
         super().__init__(coordinator)
@@ -85,12 +81,17 @@ class SecurityModeSelect(CoordinatorEntity[EisenbergCoordinator], SelectEntity):
             self._attr_device_info = {
                 "identifiers": {("eisenberg", anchor.device_id)},
             }
-        self._attr_current_option = location.active_mode
+        self._attr_options = location.mode_options
+        self._attr_current_option = location.mode_label
 
     @callback
     def _handle_coordinator_update(self) -> None:
+        # Options follow the location's custom modes, which the Arlo app can
+        # add, rename or delete at any time (#39).
         location = self.coordinator.locations.get(self._location_id)
-        self._attr_current_option = location.active_mode if location is not None else None
+        if location is not None:
+            self._attr_options = location.mode_options
+        self._attr_current_option = location.mode_label if location is not None else None
         self.async_write_ha_state()
 
     async def async_select_option(self, option: str) -> None:

@@ -23,6 +23,39 @@ class ArloMode(StrEnum):
     STANDBY = "standby"
 
 
+# activeMode.mode while a location runs custom modes; which one each gateway
+# runs is in activeMode.custom (gateway id → custom mode key) — see #39.
+CUSTOM_MODE = "custom"
+
+# Name Arlo gives a migrated pre-v3 mode; like an empty name, it means "use
+# the key" (mirrors pyaarlo's location._parse_custom_modes).
+_UNNAMED_CUSTOM_MODE = "__DEFAULT_DISARMED__"
+
+
+class CustomModeEntry(BaseModel):
+    """One custom mode under customModes.properties.<gatewayId>.<key>."""
+
+    model_config = {"extra": "ignore"}
+
+    name: str = ""
+
+
+def custom_mode_labels(raw: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """customModes.properties → gateway id → mode key → display label.
+
+    Named modes (keyed by uuid) show their name; the migrated `armed` and
+    `disarmed` keys carry an empty name and show the key.
+    """
+    labels: dict[str, dict[str, str]] = {}
+    for gateway_id, modes in raw.items():
+        entries = {k: CustomModeEntry.model_validate(v) for k, v in dict(modes).items()}
+        labels[gateway_id] = {
+            key: key if entry.name in ("", _UNNAMED_CUSTOM_MODE) else entry.name
+            for key, entry in entries.items()
+        }
+    return labels
+
+
 class FactorType(StrEnum):
     """MFA second-factor types Arlo exposes via PingOne SDK."""
 
@@ -165,7 +198,8 @@ class ModeChangeEvent(BaseModel):
     model_config = {"populate_by_name": True}
 
     type: str
-    active_mode: ArloMode = Field(alias="activeMode")
+    # A standard mode, or one gateway's custom mode key (#39).
+    active_mode: str = Field(alias="activeMode")
     device_id: str = Field(alias="deviceId")
     utc_created_date: int = Field(alias="utcCreatedDate")
     date: str | None = None
@@ -208,7 +242,44 @@ class LocationState(BaseModel):
     location_name: str | None = None
     gateway_device_ids: list[str] = Field(default_factory=list)
     active_mode: str | None = None
+    # Gateway id → custom mode key, meaningful while active_mode is "custom".
+    active_custom: dict[str, str] = Field(default_factory=dict)
+    # Gateway id → custom mode key → label, from customModes (#39).
+    custom_modes: dict[str, dict[str, str]] = Field(default_factory=dict)
     mode_revision: int = 1
+
+    def set_mode(self, mode: str, custom: dict[str, str]) -> None:
+        """Record the location's active mode as Arlo's activeMode states it."""
+        self.active_mode = mode
+        self.active_custom = custom if mode == CUSTOM_MODE else {}
+
+    @property
+    def mode_label(self) -> str | None:
+        """The active mode as offered to users: standard key or custom label."""
+        if self.active_mode != CUSTOM_MODE:
+            return self.active_mode
+        for gateway_id, key in self.active_custom.items():
+            return self.custom_modes.get(gateway_id, {}).get(key, key)
+        return None
+
+    @property
+    def mode_options(self) -> list[str]:
+        """Standard modes, then each distinct custom mode label."""
+        options = [m.value for m in ArloMode]
+        for modes in self.custom_modes.values():
+            for label in modes.values():
+                if label not in options:
+                    options.append(label)
+        return options
+
+    def custom_target(self, label: str) -> dict[str, str]:
+        """The activeMode `custom` map selecting `label` on every gateway that has it."""
+        return {
+            gateway_id: key
+            for gateway_id, modes in self.custom_modes.items()
+            for key, mode_label in modes.items()
+            if mode_label == label
+        }
 
     @classmethod
     def from_info(cls, info: LocationInfo) -> LocationState:
@@ -260,6 +331,7 @@ class ActiveModeStateProperties(BaseModel):
     model_config = {"populate_by_name": True, "extra": "ignore"}
 
     mode: str
+    custom: dict[str, str] = Field(default_factory=dict)
 
 
 class ActiveModeState(BaseModel):
@@ -276,9 +348,14 @@ class ActiveModeState(BaseModel):
 
 
 class ActiveModeProperties(BaseModel):
-    """Inner properties of an active mode update."""
+    """Inner properties of an active mode update.
 
-    mode: ArloMode
+    `mode` is a standard ArloMode or "custom"; for "custom", `custom` names the
+    mode key each gateway runs (#39).
+    """
+
+    mode: str
+    custom: dict[str, str] = Field(default_factory=dict)
 
 
 class ActiveMode(BaseModel):
