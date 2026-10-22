@@ -140,6 +140,8 @@ class DeviceState(BaseModel):
     battery_level: int | None = Field(None, alias="batteryLevel")
     charging_state: str | None = Field(None, alias="chargingState")
     connection_state: str | None = Field(None, alias="connectionState")
+    # Arlo's privacy mode: True means the camera is switched off (#39).
+    privacy_active: bool | None = Field(None, alias="privacyActive")
 
 
 class MediaMeta(BaseModel):

@@ -980,6 +980,34 @@ class EisenbergClient:
         if not body.get("success"):
             _raise_for_arlo_error(body, "request_device_states")
 
+    async def set_privacy(self, device_id: str, *, active: bool) -> None:
+        """Switch a camera off (privacy active) or back on (#39).
+
+        Mirrors pyaarlo's ArloCamera.turn_off/turn_on: a notify to the
+        camera's gateway setting privacyActive on its `cameras/<id>` resource.
+        """
+        if self.token is None:
+            raise RuntimeError("Not authenticated")
+
+        target = self._device_target(device_id)
+        async with self.session.post(
+            f"{MYAPI_BASE}/hmsweb/users/devices/notify/{target}",
+            headers=self._device_headers(self.token, device_id),
+            json={
+                "from": f"{self.user_id}_web",
+                "to": target,
+                "action": "set",
+                "resource": f"cameras/{device_id}",
+                "publishResponse": True,
+                "transId": f"web!privacy!{int(time.time())}",
+                "properties": {"privacyActive": active},
+            },
+        ) as resp:
+            body = await _read_arlo_json(resp)
+
+        if not body.get("success"):
+            _raise_for_arlo_error(body, "set_privacy")
+
     async def set_siren(self, device_id: str, *, on: bool) -> None:
         """Turn siren on or off."""
         if self.token is None:
