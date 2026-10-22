@@ -116,6 +116,8 @@ def _coordinator(client: _FakeClient) -> Any:
     coord._http_session = object()  # type: ignore[assignment]
     coord._mqtt_lock = asyncio.Lock()
     coord._reconnect_task = None
+    coord._sse = None
+    coord._sse_resources = {}
     coord._last_base_bringup = 0.0
     coord.device_states = {}
     coord.basestation_connection = {}

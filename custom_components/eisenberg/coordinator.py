@@ -28,6 +28,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from eisenberg import (
+    EVENT_STREAM_URL,
     AuthenticationError,
     DeviceInfo,
     EisenbergClient,
@@ -35,6 +36,7 @@ from eisenberg import (
     MQTTEventStream,
     RateLimitedError,
     SessionExpiredError,
+    SSEEventStream,
     TransientAPIError,
 )
 from eisenberg.models import (
@@ -50,7 +52,9 @@ from eisenberg.models import (
     SirenState,
     SnapshotAvailable,
     SpotlightState,
+    SubscribeOutcome,
 )
+from eisenberg.mqtt import EventHandler, TopicRouter, topic_matches
 
 from .const import (
     CONF_DEVICE_ID,
@@ -75,6 +79,12 @@ HEALTH_CHECK_INTERVAL = timedelta(minutes=30)
 # down is not hammered, and finite so a persistent outage falls back to the
 # health tick rather than looping forever.
 MQTT_RECONNECT_BACKOFF: tuple[float, ...] = (5.0, 15.0, 60.0, 180.0, 300.0)
+
+# SSE supplement (issue #38): retry delays for a dropped or refused stream —
+# the last one repeats, since the stream is the only path for its resources —
+# and how long a silent connection may sit before it is presumed dead.
+SSE_RECONNECT_BACKOFF: tuple[float, ...] = (5.0, 15.0, 60.0, 300.0)
+SSE_READ_TIMEOUT = 300.0
 
 # Base-station event subscriptions expire. Renew a little inside the health
 # tick so a slow tick can never leave a gap, but not so eagerly that the
@@ -152,6 +162,13 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # one into existence and leave an orphan listening in the background.
         self._mqtt_lock = asyncio.Lock()
         self._reconnect_task: asyncio.Task[None] | None = None
+        # SSE supplement, open only while the broker leaves a device resource
+        # uncovered (issue #38). _sse_resources maps each such resource
+        # ("cameras/<id>") to its device's xCloudId — the only frames SSE
+        # is allowed to feed in.
+        self._sse: SSEEventStream | None = None
+        self._sse_resources: dict[str, str] = {}
+        self._sse_router = TopicRouter()
         # Set when Arlo has rejected the session and the silent re-login could
         # not recover it. Blocks further Arlo calls until a login succeeds, so
         # a dead session cannot be retried into a rate-limit lockout (#35).
@@ -590,6 +607,93 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 verdict,
             )
 
+    def _sse_gap_resources(self, outcome: SubscribeOutcome) -> dict[str, str]:
+        """Device resources no granted MQTT filter delivers, → their xCloudId.
+
+        A device publishes its state as `cameras/<id>`, and a doorbell also
+        as `doorbells/<id>`. On accounts whose broker refuses the
+        `d/{xCloudId}/out/#` wildcard, a resource missing from the device's
+        allowedMqttTopics reaches nobody: the Gen2 doorbell's instant motion
+        on `cameras/<id>` (issue #38). Those are the resources the SSE
+        supplement exists for; anything MQTT delivers is left to MQTT.
+        """
+        granted = [r.topic for r in outcome.results if r.granted]
+        gap: dict[str, str] = {}
+        for device in self.cameras:
+            resources = [f"cameras/{device.device_id}"]
+            if device.is_doorbell:
+                resources.append(f"doorbells/{device.device_id}")
+            for resource in resources:
+                topic = f"d/{device.x_cloud_id}/out/{resource}/is"
+                if not any(topic_matches(f, topic) for f in granted):
+                    gap[resource] = device.x_cloud_id
+        return gap
+
+    def _set_sse_resources(self, resources: dict[str, str]) -> None:
+        """Fix the resources SSE may feed in, and the routes they take."""
+        self._sse_resources = resources
+        self._sse_router = TopicRouter()
+        for pattern, handler in self._event_routes():
+            self._sse_router.register(pattern, handler)
+
+    async def _sync_sse(self) -> None:
+        """Open or close the SSE supplement to match the latest SUBACK.
+
+        Runs after every MQTT (re)connect: the broker's verdict can differ
+        between connects, and SSE must only ever carry what MQTT cannot.
+        """
+        if self._mqtt is None or self._mqtt.subscribe_outcome is None:
+            return
+        gap = self._sse_gap_resources(self._mqtt.subscribe_outcome)
+        self._set_sse_resources(gap)
+        if not gap:
+            if self._sse is not None:
+                _LOGGER.info("MQTT now covers every device resource; closing SSE supplement")
+                await self._sse.stop()
+                self._sse = None
+            return
+        _LOGGER.info(
+            "MQTT broker does not deliver %s; receiving them over SSE instead",
+            sorted(gap),
+        )
+        if self._sse is None and self._http_session is not None:
+            self._sse = SSEEventStream(
+                url=EVENT_STREAM_URL,
+                headers_factory=self.client.event_stream_headers,
+                http_session=self._http_session,
+                on_event=self._handle_sse_event,
+                backoff=SSE_RECONNECT_BACKOFF,
+                read_timeout=SSE_READ_TIMEOUT,
+            )
+            self._sse.start()
+
+    async def _handle_sse_event(self, payload: dict[str, Any]) -> None:
+        """Route one SSE frame through the MQTT handlers, if it fills a gap.
+
+        SSE carries every account event; MQTT already delivers almost all of
+        them, so everything outside _sse_resources is dropped unseen. An
+        accepted frame gets the topic MQTT would have used — the payload is
+        the same JSON either way, and `d/{x}/out/{resource}/{action}` is the
+        shape for device resources.
+        """
+        resource = payload.get("resource")
+        action = payload.get("action")
+        if not isinstance(resource, str) or not isinstance(action, str):
+            return
+        x_cloud_id = self._sse_resources.get(resource)
+        if x_cloud_id is None:
+            return
+        topic = f"d/{x_cloud_id}/out/{resource}/{action}"
+        _LOGGER.debug("SSE recv topic=%s", topic)
+        handlers = self._sse_router.match(topic)
+        if not handlers:
+            _LOGGER.info("Unhandled SSE topic %s: %s", topic, json.dumps(payload)[:500])
+            return
+        for handler in handlers:
+            result = handler(topic, payload)
+            if asyncio.iscoroutine(result):
+                await result
+
     async def async_set_active_mode(self, location_id: str, mode: str) -> None:
         """Set the security mode of one location via the v3 location API.
 
@@ -814,74 +918,62 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._seed_image_cache_from_disk()
         await self._prune_old_media()
 
-    def _register_mqtt_handlers(self) -> None:
-        """Register MQTT topic handlers."""
-        if self._mqtt is None:
-            return
+    def _event_routes(self) -> list[tuple[str, EventHandler]]:
+        """Topic pattern → handler table, shared by MQTT and the SSE supplement."""
+        routes: list[tuple[str, EventHandler]] = []
 
         # Camera state updates
-        self._mqtt.on("d/+/out/cameras/+/is", self._handle_camera_state)
+        routes.append(("d/+/out/cameras/+/is", self._handle_camera_state))
 
         # Full device-properties dump — carries spotlight, battery, WiFi,
         # motion zones etc. Topic name is misleading; same handler works
         # because `properties` is a superset of the partial-update shape.
-        self._mqtt.on("d/+/out/cameras/+/privacyZones/is", self._handle_camera_state)
+        routes.append(("d/+/out/cameras/+/privacyZones/is", self._handle_camera_state))
 
         # Doorbell state updates. Video doorbells (e.g. FB1001A) are a
         # distinct `doorbells` resource — not `cameras` — and publish their
         # motionDetected/battery/signal on this topic. Same payload shape as
         # cameras, so the same handler parses it; topic part[4] is still the
         # deviceId. Without this, doorbell entities never update (issue #10).
-        self._mqtt.on("d/+/out/doorbells/+/is", self._handle_camera_state)
-        self._mqtt.on("d/+/out/doorbells/+/privacyZones/is", self._handle_camera_state)
+        routes.append(("d/+/out/doorbells/+/is", self._handle_camera_state))
+        routes.append(("d/+/out/doorbells/+/privacyZones/is", self._handle_camera_state))
 
         # Snapshot available — cameras and doorbells both emit this.
-        self._mqtt.on(
-            "d/+/out/cameras/+/fullFrameSnapshotAvailable",
-            self._handle_snapshot,
-        )
-        self._mqtt.on(
-            "d/+/out/doorbells/+/fullFrameSnapshotAvailable",
-            self._handle_snapshot,
-        )
+        routes.append(("d/+/out/cameras/+/fullFrameSnapshotAvailable", self._handle_snapshot))
+        routes.append(("d/+/out/doorbells/+/fullFrameSnapshotAvailable", self._handle_snapshot))
 
         # Some models answer a snapshot request on `lastImageSnapshotAvailable`
         # instead — same image, different property name — even when the request
         # went out as a fullFrameSnapshot. Without this the reply falls through
         # as an Unhandled topic and the tile never refreshes (issue #26).
-        self._mqtt.on(
-            "d/+/out/cameras/+/lastImageSnapshotAvailable",
-            self._handle_last_image_snapshot,
+        routes.append(
+            ("d/+/out/cameras/+/lastImageSnapshotAvailable", self._handle_last_image_snapshot)
         )
-        self._mqtt.on(
-            "d/+/out/doorbells/+/lastImageSnapshotAvailable",
-            self._handle_last_image_snapshot,
+        routes.append(
+            ("d/+/out/doorbells/+/lastImageSnapshotAvailable", self._handle_last_image_snapshot)
         )
 
         # Siren state
-        self._mqtt.on("d/+/out/siren/+/is", self._handle_siren)
+        routes.append(("d/+/out/siren/+/is", self._handle_siren))
 
         # Feed notifications (motion events, mode changes)
-        self._mqtt.on("u/+/in/feed/live", self._handle_feed)
+        routes.append(("u/+/in/feed/live", self._handle_feed))
 
         # Media uploads
-        self._mqtt.on("u/+/in/library/add", self._handle_media_upload)
+        routes.append(("u/+/in/library/add", self._handle_media_upload))
 
         # Mode changes
-        self._mqtt.on("u/+/in/automation/activeMode/is", self._handle_active_mode)
+        routes.append(("u/+/in/automation/activeMode/is", self._handle_active_mode))
 
         # Connectivity
-        self._mqtt.on(
-            "d/+/out/basestation/connectivity/is",
-            self._handle_connectivity,
-        )
+        routes.append(("d/+/out/basestation/connectivity/is", self._handle_connectivity))
 
         # Base station heartbeat (frequent, includes connectionState)
-        self._mqtt.on("d/+/out/basestation/is", self._handle_basestation)
+        routes.append(("d/+/out/basestation/is", self._handle_basestation))
 
         # Per-device states broadcast — activeMode mirrors the automation
         # topic in friendly name form, plus motionStart actions config.
-        self._mqtt.on("d/+/out/devices/+/states/is", self._handle_device_states)
+        routes.append(("d/+/out/devices/+/states/is", self._handle_device_states))
 
         # A base station's answer to our `{action: get, resource: devices}`
         # pull. Arlo derives the topic from the reply's resource, so the
@@ -889,14 +981,23 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # `devices/{id}/states` route above (issue #27). Deliberately a
         # narrow route, not a `devices/#` catch-all: an unexpected shape
         # must keep surfacing through the Unhandled MQTT topic log.
-        self._mqtt.on("d/+/out/devices/is", self._handle_devices_response)
+        routes.append(("d/+/out/devices/is", self._handle_devices_response))
 
         # The base station's acknowledgement of our event subscription.
-        self._mqtt.on("d/+/out/subscriptions/+/is", self._handle_subscription_ack)
+        routes.append(("d/+/out/subscriptions/+/is", self._handle_subscription_ack))
 
         # Geofence configuration push — informational only, just absorb
         # the topic so it doesn't show up as Unhandled.
-        self._mqtt.on("u/+/in/automation/geofences/is", self._handle_geofences)
+        routes.append(("u/+/in/automation/geofences/is", self._handle_geofences))
+
+        return routes
+
+    def _register_mqtt_handlers(self) -> None:
+        """Register MQTT topic handlers."""
+        if self._mqtt is None:
+            return
+        for pattern, handler in self._event_routes():
+            self._mqtt.on(pattern, handler)
 
         # Reconnect handler. Bound to *this* stream: the callback fires from
         # the tail of a listen loop that may already have been replaced, and
@@ -1496,6 +1597,11 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._mqtt = None
                 return False
             self._log_subscribe_outcome()
+            try:
+                await self._sync_sse()
+            except Exception:
+                # The supplement is best-effort; MQTT is up and stays up.
+                _LOGGER.warning("Could not set up the SSE supplement", exc_info=True)
             return True
 
     async def _reconnect_mqtt_with_backoff(self) -> None:
@@ -1654,6 +1760,9 @@ class EisenbergCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._mqtt:
             await self._mqtt.disconnect()
             self._mqtt = None
+        if self._sse is not None:
+            await self._sse.stop()
+            self._sse = None
         if self._http_session:
             await self._http_session.close()
             self._http_session = None

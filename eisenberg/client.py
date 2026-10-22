@@ -44,6 +44,8 @@ _LOGGER = logging.getLogger(__name__)
 
 OCAPI_BASE = "https://ocapi-app.arlo.com"
 MYAPI_BASE = "https://myapi.arlo.com"
+# Server-sent event stream: the same account events MQTT carries, no ACL.
+EVENT_STREAM_URL = f"{MYAPI_BASE}/hmsweb/client/subscribe"
 
 # Arlo error codes that mean "your token is bad — log in again". Other codes
 # are operational (rate-limit, mode-conflict, etc.) and not auth-related.
@@ -146,6 +148,8 @@ def _dedupe_devices(devices: list[DeviceInfo]) -> list[DeviceInfo]:
 
 # Mobile UA to get RTSP URLs from startStream (not DASH)
 _MOBILE_UA = "Arlo/4.0 (iPhone; iOS 18.0)"
+# pyaarlo's default ("arlo") user agent, the one its SSE backend is heard with.
+_SSE_UA = "(iPhone15,2 18_1_1) iOS Arlo 5.4.3"
 _BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -285,6 +289,23 @@ class EisenbergClient:
             "Origin": "https://my.arlo.com",
             "Referer": "https://my.arlo.com/",
             "User-Agent": _BROWSER_UA,
+        }
+
+    def event_stream_headers(self) -> dict[str, str]:
+        """Headers for EVENT_STREAM_URL, built from the current token.
+
+        Called on every SSE (re)connect so a refreshed token is used. Same
+        shape pyaarlo sends for its SSE backend.
+        """
+        if self.token is None:
+            raise RuntimeError("Not logged in; no token for the event stream")
+        return {
+            "Authorization": self.token,
+            "Auth-Version": "2",
+            "SchemaVersion": "1",
+            "Origin": "https://my.arlo.com",
+            "Referer": "https://my.arlo.com/",
+            "User-Agent": _SSE_UA,
         }
 
     def _device_headers(self, token: str, device_id: str) -> dict[str, str]:

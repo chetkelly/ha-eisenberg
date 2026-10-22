@@ -87,20 +87,25 @@ class TopicRouter:
         parts = topic.split("/")
         matched: list[EventHandler] = []
         for pattern_parts, handler in self._routes:
-            if self._matches(pattern_parts, parts):
+            if _matches(pattern_parts, parts):
                 matched.append(handler)
         return matched
 
-    @staticmethod
-    def _matches(pattern: list[str], topic: list[str]) -> bool:
-        for i, p in enumerate(pattern):
-            if p == "#":
-                return True  # Matches rest
-            if i >= len(topic):
-                return False
-            if p != "+" and p != topic[i]:
-                return False
-        return len(pattern) == len(topic)
+
+def topic_matches(topic_filter: str, topic: str) -> bool:
+    """True when an MQTT topic filter (`+`/`#` wildcards) matches topic."""
+    return _matches(topic_filter.split("/"), topic.split("/"))
+
+
+def _matches(pattern: list[str], topic: list[str]) -> bool:
+    for i, p in enumerate(pattern):
+        if p == "#":
+            return True  # Matches rest
+        if i >= len(topic):
+            return False
+        if p != "+" and p != topic[i]:
+            return False
+    return len(pattern) == len(topic)
 
 
 class MQTTEventStream:
