@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.6.0 — 2026-10-26
+
+### Added
+
+- **Custom modes in the security mode select (#39).** Modes you create in the
+  Arlo app now appear after Arm Away, Arm Home and Standby, show as the
+  current option when active, and can be selected from Home Assistant. The
+  list follows the app live: create, rename or delete a mode and the select
+  updates. Arlo's nameless `armed`/`disarmed` modes, carried over when an
+  account is migrated to custom modes, are not offered.
+- **Per-camera on/off switch (#39).** Cameras that support Arlo's privacy
+  mode get a "Camera" switch: off turns the camera off, on brings it back.
+
+### Fixed
+
+- **Picking a custom mode in the Arlo app no longer leaves the select stuck
+  (#39).** The mode event failed to parse (`Failed to parse active mode`) and
+  the select kept showing the previous mode.
+
 ## 0.5.2 — 2026-10-22
 
 ### Fixed
