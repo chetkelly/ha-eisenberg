@@ -6,9 +6,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+import logging
+from typing import TYPE_CHECKING, Any
+
+import aiohttp
 
 from eisenberg.sse import SSEEventStream, SSEParser
+
+if TYPE_CHECKING:
+    import pytest
 
 
 class TestSSEParser:
@@ -199,3 +205,66 @@ class TestEventStreamHeaders:
         client = EisenbergClient(email="e", password="p", device_id="d")
         with pytest.raises(RuntimeError):
             client.event_stream_headers()
+
+
+class _TimeoutContent:
+    """An idle Arlo stream: nothing arrives until the read timeout fires."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+
+    async def iter_any(self) -> Any:
+        for chunk in self._chunks:
+            yield chunk
+        raise aiohttp.SocketTimeoutError("Timeout on reading data from socket")
+
+
+class TestIdleTimeout:
+    """Arlo sends nothing on an idle SSE stream, so the read timeout fires
+    every few minutes. That is the normal end of a session, not a failure: a
+    backoff there left the stream down for minutes at a time and missed the
+    doorbell motion it exists to catch (#38)."""
+
+    async def test_idle_timeout_reconnects_at_once_without_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        first = _FakeResponse(200, [])
+        first.content = _TimeoutContent([_frame({"status": "connected"})])  # type: ignore[assignment]
+        payload = {"resource": "cameras/D", "action": "is", "properties": {}}
+        session = _FakeSession([first, _FakeResponse(200, [_frame(payload)])])
+        received: list[dict[str, Any]] = []
+        done = asyncio.Event()
+
+        async def on_event(p: dict[str, Any]) -> None:
+            received.append(p)
+            done.set()
+
+        stream = SSEEventStream(
+            url="u",
+            headers_factory=lambda: {},
+            http_session=session,  # type: ignore[arg-type]
+            on_event=on_event,
+            backoff=(60.0,),  # would blow the test timeout if applied
+            read_timeout=5.0,
+        )
+        with caplog.at_level(logging.WARNING):
+            stream.start()
+            await asyncio.wait_for(done.wait(), timeout=2)
+            await stream.stop()
+        assert received == [payload]
+        assert "SSE event stream failed" not in caplog.text
+
+    async def test_real_failure_still_backs_off(self) -> None:
+        session = _FakeSession([_FakeResponse(503, []), _FakeResponse(200, [])])
+        stream = SSEEventStream(
+            url="u",
+            headers_factory=lambda: {},
+            http_session=session,  # type: ignore[arg-type]
+            on_event=lambda _p: asyncio.sleep(0),
+            backoff=(60.0,),
+            read_timeout=5.0,
+        )
+        stream.start()
+        await asyncio.sleep(0.2)
+        await stream.stop()
+        assert len(session.requests) == 1  # still waiting out the backoff

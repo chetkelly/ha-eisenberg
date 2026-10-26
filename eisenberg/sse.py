@@ -85,6 +85,9 @@ class SSEEventStream:
         self._backoff = backoff
         self._read_timeout = read_timeout
         self._task: asyncio.Task[None] | None = None
+        # True while reconnecting after a healthy session ended; those
+        # reconnects happen every few minutes and are logged quietly.
+        self._routine_reconnect = False
 
     def start(self) -> None:
         """Start the background read/reconnect loop."""
@@ -109,10 +112,15 @@ class SSEEventStream:
             except Exception as err:
                 _LOGGER.warning("SSE event stream failed: %s", err)
                 delivered = False
-            # A session that got as far as delivering anything was healthy;
-            # only back-to-back failures climb the backoff.
-            failures = 0 if delivered else failures + 1
+            self._routine_reconnect = delivered
+            if delivered:
+                # A healthy session that ended (idle timeout, logout, server
+                # close): reconnect at once. Any pause here is a window in
+                # which the events this stream exists for are lost (#38).
+                failures = 0
+                continue
             delay = self._backoff[min(failures, len(self._backoff) - 1)]
+            failures += 1
             await asyncio.sleep(delay)
 
     async def _read_session(self) -> bool:
@@ -131,7 +139,20 @@ class SSEEventStream:
                 raise ConnectionError(f"HTTP {resp.status}")
             parser = SSEParser()
             delivered = False
-            async for chunk in resp.content.iter_any():
+            chunks = resp.content.iter_any()
+            while True:
+                try:
+                    chunk = await anext(chunks)
+                except StopAsyncIteration:
+                    break
+                except TimeoutError:
+                    # Arlo sends nothing at all on an idle stream, not even a
+                    # keepalive, so the read timeout firing is routine: it is
+                    # only how a silently dead connection gets noticed.
+                    _LOGGER.debug(
+                        "SSE event stream idle for %ss; reconnecting", self._read_timeout
+                    )
+                    return True
                 for data in parser.feed(chunk):
                     delivered = True
                     _LOGGER.debug("SSE frame: %s", data[:500])
@@ -145,7 +166,10 @@ class SSEEventStream:
                         continue
                     frame: dict[str, Any] = payload  # pyright: ignore[reportUnknownVariableType]
                     if frame.get("status") == "connected":
-                        _LOGGER.info("SSE event stream connected")
+                        _LOGGER.log(
+                            logging.DEBUG if self._routine_reconnect else logging.INFO,
+                            "SSE event stream connected",
+                        )
                         continue
                     if frame.get("action") == "logout":
                         # Arlo ended this session (a token refresh or a login
