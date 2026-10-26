@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.6.1 — 2026-10-26
+
+### Fixed
+
+- **Gen2 doorbell Motion is no longer missed intermittently (#38).** Arlo's
+  event stream sends nothing while idle, so its read timeout fired every
+  five minutes; 0.5.2 treated that as a failure and waited up to five minutes
+  before reconnecting, missing any motion in between, and logged
+  `SSE event stream failed: Timeout on reading data from socket` each time.
+  The stream now reconnects immediately and quietly after an idle timeout;
+  only genuine failures back off.
+
 ## 0.6.0 — 2026-10-26
 
 ### Added
