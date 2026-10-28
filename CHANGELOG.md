@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.6.2 — 2026-10-28
+
+### Fixed
+
+- **Camera on/off switch now appears for cameras on a base station (#39).**
+  Base-station accounts (e.g. VMB4000) report no camera properties at
+  startup, so the switch was never created. It now is; its state shows as
+  unknown until the camera first reports its on/off state.
+- **Per-location security mode selects attach to a device in their own
+  location (#39).** On multi-location accounts every select was attached to
+  the first device, because Arlo prefixes gateway ids with the owner id.
+
 ## 0.6.1 — 2026-10-26
 
 ### Fixed
