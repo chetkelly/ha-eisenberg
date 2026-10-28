@@ -29,13 +29,15 @@ async def async_setup_entry(
 
 
 def build_switches(coordinator: EisenbergCoordinator) -> list[SwitchEntity]:
-    """A siren per camera, plus an on/off switch for each camera whose
-    properties report Arlo's privacy mode (the ones that can be switched off)."""
+    """A siren per camera, plus an on/off switch for each camera that reports
+    Arlo's privacy mode, or reports no properties at all: VMB4000 accounts
+    return empty REST properties for base-stationed cameras, whose state only
+    arrives over MQTT (#39)."""
     switches: list[SwitchEntity] = [SirenSwitch(coordinator, d) for d in coordinator.cameras]
     switches.extend(
         CameraPowerSwitch(coordinator, d)
         for d in coordinator.cameras
-        if d.properties is not None and "privacyActive" in d.properties
+        if not d.properties or "privacyActive" in d.properties
     )
     return switches
 

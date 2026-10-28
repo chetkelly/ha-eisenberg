@@ -57,6 +57,22 @@ class TestBuildModeSelects:
             "eisenberg_security_mode_locB",
         }
 
+    def test_each_select_anchors_to_a_device_in_its_location(self) -> None:
+        # Arlo sends gatewayDeviceIds as "{ownerId}_{deviceId}" (#39).
+        a = LocationState(location_id="locA", gateway_device_ids=["O_BASE-1"])
+        b = LocationState(location_id="locB", gateway_device_ids=["O_BASE-2"])
+        cam_a = _device("CAM-A", parent_id="BASE-1")
+        cam_b = _device("CAM-B", parent_id="BASE-2")
+        coord = _coord([a, b], [cam_a, cam_b])
+        anchors = {
+            s.unique_id: next(iter(s.device_info["identifiers"]))[1]  # type: ignore[index]
+            for s in build_mode_selects(coord)
+        }
+        assert anchors == {
+            "eisenberg_security_mode_locA": "CAM-A",
+            "eisenberg_security_mode_locB": "CAM-B",
+        }
+
 
 class TestSecurityModeSelectBehavior:
     def test_handle_update_reflects_its_location_mode(self) -> None:

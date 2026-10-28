@@ -18,7 +18,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from eisenberg.models import DeviceInfo, LocationState
 
-from .coordinator import EisenbergCoordinator
+from .coordinator import EisenbergCoordinator, resolve_location_for_device
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ def _representative_device(
     where Arlo omitted gatewayDeviceIds) still attach to a device.
     """
     for device in coordinator.devices:
-        if (device.parent_id or device.device_id) in location.gateway_device_ids:
+        if resolve_location_for_device(device, [location]) is not None:
             return device
     return coordinator.devices[0] if coordinator.devices else None
 

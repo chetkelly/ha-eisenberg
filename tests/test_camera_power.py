@@ -48,6 +48,20 @@ class TestBuildSwitches:
         powers = [s for s in build_switches(coord) if isinstance(s, CameraPowerSwitch)]  # type: ignore[arg-type]
         assert [s._device.device_id for s in powers] == ["CAM-A"]
 
+    def test_power_switch_when_rest_reports_no_properties(self) -> None:
+        # VMB4000 accounts return empty REST properties for base-stationed
+        # cameras; their state only arrives over MQTT (#39).
+        empty = _device("CAM-E", {})
+        absent = _device("CAM-N", None)
+        coord = SimpleNamespace(cameras=[empty, absent], device_states={})
+        powers = [s for s in build_switches(coord) if isinstance(s, CameraPowerSwitch)]  # type: ignore[arg-type]
+        assert [s._device.device_id for s in powers] == ["CAM-E", "CAM-N"]
+
+    def test_state_unknown_until_mqtt_reports_privacy(self) -> None:
+        sw = _switch(_device("CAM", {}), {})
+        sw._handle_coordinator_update()
+        assert sw._attr_is_on is None
+
 
 class TestCameraPowerState:
     def test_on_when_privacy_inactive(self) -> None:
